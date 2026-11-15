@@ -1,0 +1,80 @@
+name: Personal simulation iOS (manual)
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: personal-simulation-ios-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect toolchain and project
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ios-logs"
+          sw_vers | tee "$RUNNER_TEMP/ios-logs/platform.log"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version | tee "$RUNNER_TEMP/ios-logs/xcode.log"
+          swift --version | tee "$RUNNER_TEMP/ios-logs/swift.log"
+          xcodebuild -list -project Unstoppable/Simulation.xcodeproj | tee "$RUNNER_TEMP/ios-logs/project.log"
+          xcodebuild -resolvePackageDependencies -project Unstoppable/Simulation.xcodeproj -scheme Simulation | tee "$RUNNER_TEMP/ios-logs/resolve.log"
+          swift package --package-path Unstoppable/Simulation resolve
+      - name: Run native package XCTest suite
+        run: |
+          set -euo pipefail
+          swift test --package-path Unstoppable/Simulation 2>&1 | tee "$RUNNER_TEMP/ios-logs/swift-tests.log"
+      - name: Compile iOS Simulator app
+        run: |
+          set -euo pipefail
+          xcodebuild -project Unstoppable/Simulation.xcodeproj -scheme Simulation -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/simulation-simulator" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-logs/simulator-build.log"
+      # Simulation.xcscheme has no iOS XCTest/UI test target yet; swift test above
+      # runs the actual package tests on macOS rather than claiming iOS tests ran.
+      - name: Compile unsigned arm64 iPhone app
+        run: |
+          set -euo pipefail
+          xcodebuild -project Unstoppable/Simulation.xcodeproj -scheme Simulation -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/simulation-device" ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-logs/device-build.log"
+      - name: Verify and package unsigned device app
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/simulation-device/Build/Products/Release-iphoneos/UnstoppableSimulation.app"
+          PLIST="$APP/Info.plist"
+          EXE="$APP/UnstoppableSimulation"
+          test -f "$EXE"
+          plutil -lint "$PLIST"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" = org.personal.unstoppablesimulation
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$PLIST")" = 'Unstoppable Wallet'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$PLIST")" = 17.0
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIcons' "$PLIST"
+          test -f "$APP/Assets.car"
+          test -f "$APP/LICENSE"
+          lipo -verify_arch arm64 "$EXE"
+          file "$EXE" | tee "$RUNNER_TEMP/ios-logs/executable.log"
+          xcrun vtool -show-build "$EXE" | tee "$RUNNER_TEMP/ios-logs/platform-macho.log"
+          grep -Eq 'platform (IOS|2)$' "$RUNNER_TEMP/ios-logs/platform-macho.log"
+          otool -L "$EXE" | tee "$RUNNER_TEMP/ios-logs/libraries.log"
+          mkdir -p "$RUNNER_TEMP/package/Payload"
+          ditto "$APP" "$RUNNER_TEMP/package/Payload/UnstoppableSimulation.app"
+          cd "$RUNNER_TEMP/package"
+          zip -qry Unstoppable-Wallet-Simulation.ipa Payload
+          unzip -t Unstoppable-Wallet-Simulation.ipa | tee "$RUNNER_TEMP/ios-logs/ipa-verification.log"
+      # A public release avoids Actions artifact storage. The IPA and build logs
+      # are public and the unsigned IPA is not installable until signed.
+      - name: Publish unsigned IPA to public prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "simulation-build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            "$RUNNER_TEMP/package/Unstoppable-Wallet-Simulation.ipa" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "Unsigned simulation build ${GITHUB_RUN_ID}" \
+            --notes "Unofficial simulation; this unsigned IPA requires personal signing and has not been tested on an iPhone."
