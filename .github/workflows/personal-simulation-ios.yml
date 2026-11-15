@@ -56,7 +56,7 @@ jobs:
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIcons' "$PLIST"
           test -f "$APP/Assets.car"
           test -f "$APP/LICENSE"
-          lipo -verify_arch arm64 "$EXE"
+          lipo "$EXE" -verify_arch arm64
           file "$EXE" | tee "$RUNNER_TEMP/ios-logs/executable.log"
           xcrun vtool -show-build "$EXE" | tee "$RUNNER_TEMP/ios-logs/platform-macho.log"
           grep -Eq 'platform (IOS|2)$' "$RUNNER_TEMP/ios-logs/platform-macho.log"
